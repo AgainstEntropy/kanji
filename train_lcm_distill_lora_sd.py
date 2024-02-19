@@ -38,7 +38,7 @@ from packaging import version
 from peft import LoraConfig, get_peft_model, get_peft_model_state_dict
 from torchvision import transforms
 from tqdm.auto import tqdm
-from transformers import AutoTokenizer, CLIPTextModel, PretrainedConfig
+from transformers import AutoTokenizer, CLIPTextModel
 
 import diffusers
 from diffusers import (
@@ -52,7 +52,6 @@ from diffusers.optimization import get_scheduler
 from diffusers.training_utils import resolve_interpolation_mode
 from diffusers.utils import (
     check_min_version, 
-    convert_state_dict_to_diffusers,
     is_wandb_available
 )
 from diffusers.utils.import_utils import is_xformers_available
@@ -85,10 +84,18 @@ VAL_PROMPTS = [
 ]
 
 
+def unwrap_peft_state_dict(module: torch.nn.Module, dtype: torch.dtype, adapter_name: str = "default"):
+    unwrapped_state_dict = {}
+    for peft_key, weight in get_peft_model_state_dict(module, adapter_name=adapter_name).items():
+        key = peft_key.replace("base_model.model.", "")
+        unwrapped_state_dict[key] = weight.to(dtype)
+
+    return unwrapped_state_dict
+
+
 def log_validation(vae, unet, args, accelerator, weight_dtype, step):
     logger.info("Running validation... ")
 
-    unet = accelerator.unwrap_model(unet)
     pipeline = StableDiffusionPipeline.from_pretrained(
         args.pretrained_teacher_model,
         vae=vae,
@@ -96,15 +103,16 @@ def log_validation(vae, unet, args, accelerator, weight_dtype, step):
         revision=args.revision,
         torch_dtype=weight_dtype,
         safety_checker=None,
+        requires_safety_checker=False,
     )
     pipeline.set_progress_bar_config(disable=True)
 
-    # lora_state_dict = convert_state_dict_to_diffusers(get_peft_model_state_dict(unet))
-    lora_state_dict = get_peft_model_state_dict(unet)
-    pipeline.load_lora_weights(lora_state_dict)  # BUG: This is not working
+    unwrapped_unet = accelerator.unwrap_model(unet)
+    lora_state_dict = unwrap_peft_state_dict(unwrapped_unet, weight_dtype)
+    pipeline.load_lora_weights(lora_state_dict)
     pipeline.fuse_lora()
 
-    pipeline = pipeline.to(accelerator.device, dtype=weight_dtype)
+    pipeline.to(accelerator.device, dtype=weight_dtype)
     if args.enable_xformers_memory_efficient_attention:
         pipeline.enable_xformers_memory_efficient_attention()
 
@@ -120,8 +128,10 @@ def log_validation(vae, unet, args, accelerator, weight_dtype, step):
         with torch.autocast("cuda", dtype=weight_dtype):
             images = pipeline(
                 prompt=prompt,
+                height=args.resolution,
+                width=args.resolution,
                 num_inference_steps=4,
-                num_images_per_prompt=4,
+                num_images_per_prompt=2,
                 generator=generator,
                 guidance_scale=1.0,
             ).images
@@ -862,14 +872,14 @@ def main(args):
         # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
         def save_model_hook(models, weights, output_dir):
             if accelerator.is_main_process:
-                unet_ = accelerator.unwrap_model(unet)
-                lora_state_dict = get_peft_model_state_dict(unet_, adapter_name="default")
+                unwrapped_unet = accelerator.unwrap_model(unet)
+                lora_state_dict = unwrap_peft_state_dict(unwrapped_unet, weight_dtype)
                 StableDiffusionPipeline.save_lora_weights(
                     save_directory=os.path.join(output_dir, "unet_lora"), 
                     unet_lora_layers=lora_state_dict,
                 )
                 # save weights in peft format to be able to load them back
-                unet_.save_pretrained(output_dir)
+                unwrapped_unet.save_pretrained(output_dir)
 
                 for _, model in enumerate(models):
                     # make sure to pop weight so that corresponding model is not saved again
@@ -1332,9 +1342,9 @@ def main(args):
     # Create the pipeline using the trained modules and save it.
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
-        unet = accelerator.unwrap_model(unet)
-        unet.save_pretrained(args.output_dir)
-        lora_state_dict = get_peft_model_state_dict(unet, adapter_name="default")
+        unwrapped_unet = accelerator.unwrap_model(unet)
+        unwrapped_unet.save_pretrained(args.output_dir)
+        lora_state_dict = unwrap_peft_state_dict(unwrapped_unet, weight_dtype)
         StableDiffusionPipeline.save_lora_weights(
             save_directory=os.path.join(args.output_dir, "unet_lora"), 
             unet_lora_layers=lora_state_dict,
