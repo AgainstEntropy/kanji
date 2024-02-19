@@ -8,6 +8,8 @@ PROJECT_DIR="$VAST/codes/kanji"
 SCRIPT_PATH="${PROJECT_DIR}/train_lcm_distill_lora_sd.py"
 OUTPUT_DIR="${PROJECT_DIR}/kanji-lora-lcm-sd-15"
 
+source $VAST/miniconda3/bin/activate kanji
+
 accelerate launch ${SCRIPT_PATH} \
     --pretrained_teacher_model=${MODEL_NAME}  \
     --pretrained_vae_model_name_or_path=${VAE_PATH} \

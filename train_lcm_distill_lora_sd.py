@@ -64,7 +64,7 @@ if is_wandb_available():
     import wandb
 
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
-check_min_version("0.27.0.dev0")
+# check_min_version("0.27.0.dev0")
 
 logger = get_logger(__name__)
 
@@ -101,7 +101,7 @@ def log_validation(vae, unet, args, accelerator, weight_dtype, step):
 
     # lora_state_dict = convert_state_dict_to_diffusers(get_peft_model_state_dict(unet))
     lora_state_dict = get_peft_model_state_dict(unet)
-    pipeline.load_lora_weights(lora_state_dict)
+    pipeline.load_lora_weights(lora_state_dict)  # BUG: This is not working
     pipeline.fuse_lora()
 
     pipeline = pipeline.to(accelerator.device, dtype=weight_dtype)
@@ -1015,6 +1015,7 @@ def main(args):
         batch_size=args.train_batch_size,
         num_workers=args.dataloader_num_workers,
     )
+    setattr(train_dataloader, "num_batches", len(train_dataloader))
 
     def compute_embeddings(prompt_batch, proportion_empty_prompts, text_encoder, tokenizer, is_train=True):
         prompt_embeds = encode_prompt(prompt_batch, text_encoder, tokenizer, proportion_empty_prompts, is_train)
