@@ -16,41 +16,29 @@
 import argparse
 import functools
 import gc
-import itertools
-import json
 import logging
 import math
 import os
 import random
 import shutil
 from pathlib import Path
-from typing import List, Union
 
 import accelerate
 import numpy as np
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
-import torchvision.transforms.functional as TF
 import transformers
-import webdataset as wds
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
-from braceexpand import braceexpand
+from datasets import load_dataset
 from huggingface_hub import create_repo, upload_folder
 from packaging import version
 from peft import LoraConfig, get_peft_model, get_peft_model_state_dict
-from torch.utils.data import default_collate
 from torchvision import transforms
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer, CLIPTextModel, PretrainedConfig
-from webdataset.tariterators import (
-    base_plus_ext,
-    tar_file_expander,
-    url_opener,
-    valid_sample,
-)
 
 import diffusers
 from diffusers import (
@@ -62,7 +50,11 @@ from diffusers import (
 )
 from diffusers.optimization import get_scheduler
 from diffusers.training_utils import resolve_interpolation_mode
-from diffusers.utils import check_min_version, is_wandb_available
+from diffusers.utils import (
+    check_min_version, 
+    convert_state_dict_to_diffusers,
+    is_wandb_available
+)
 from diffusers.utils.import_utils import is_xformers_available
 
 
@@ -76,164 +68,21 @@ check_min_version("0.27.0.dev0")
 
 logger = get_logger(__name__)
 
+DATASET_NAME_MAPPING = {
+    "lambdalabs/pokemon-blip-captions": ("image", "text"),
+    "AgainstEntropy/kanji-20230110-main": ("image", "text"),
+}
 
-def get_module_kohya_state_dict(module, prefix: str, dtype: torch.dtype, adapter_name: str = "default"):
-    kohya_ss_state_dict = {}
-    for peft_key, weight in get_peft_model_state_dict(module, adapter_name=adapter_name).items():
-        kohya_key = peft_key.replace("base_model.model", prefix)
-        kohya_key = kohya_key.replace("lora_A", "lora_down")
-        kohya_key = kohya_key.replace("lora_B", "lora_up")
-        kohya_key = kohya_key.replace(".", "_", kohya_key.count(".") - 2)
-        kohya_ss_state_dict[kohya_key] = weight.to(dtype)
-
-        # Set alpha parameter
-        if "lora_down" in kohya_key:
-            alpha_key = f'{kohya_key.split(".")[0]}.alpha'
-            kohya_ss_state_dict[alpha_key] = torch.tensor(module.peft_config[adapter_name].lora_alpha).to(dtype)
-
-    return kohya_ss_state_dict
-
-
-def filter_keys(key_set):
-    def _f(dictionary):
-        return {k: v for k, v in dictionary.items() if k in key_set}
-
-    return _f
-
-
-def group_by_keys_nothrow(data, keys=base_plus_ext, lcase=True, suffixes=None, handler=None):
-    """Return function over iterator that groups key, value pairs into samples.
-
-    :param keys: function that splits the key into key and extension (base_plus_ext) :param lcase: convert suffixes to
-    lower case (Default value = True)
-    """
-    current_sample = None
-    for filesample in data:
-        assert isinstance(filesample, dict)
-        fname, value = filesample["fname"], filesample["data"]
-        prefix, suffix = keys(fname)
-        if prefix is None:
-            continue
-        if lcase:
-            suffix = suffix.lower()
-        # FIXME webdataset version throws if suffix in current_sample, but we have a potential for
-        #  this happening in the current LAION400m dataset if a tar ends with same prefix as the next
-        #  begins, rare, but can happen since prefix aren't unique across tar files in that dataset
-        if current_sample is None or prefix != current_sample["__key__"] or suffix in current_sample:
-            if valid_sample(current_sample):
-                yield current_sample
-            current_sample = {"__key__": prefix, "__url__": filesample["__url__"]}
-        if suffixes is None or suffix in suffixes:
-            current_sample[suffix] = value
-    if valid_sample(current_sample):
-        yield current_sample
-
-
-def tarfile_to_samples_nothrow(src, handler=wds.warn_and_continue):
-    # NOTE this is a re-impl of the webdataset impl with group_by_keys that doesn't throw
-    streams = url_opener(src, handler=handler)
-    files = tar_file_expander(streams, handler=handler)
-    samples = group_by_keys_nothrow(files, handler=handler)
-    return samples
-
-
-class WebdatasetFilter:
-    def __init__(self, min_size=1024, max_pwatermark=0.5):
-        self.min_size = min_size
-        self.max_pwatermark = max_pwatermark
-
-    def __call__(self, x):
-        try:
-            if "json" in x:
-                x_json = json.loads(x["json"])
-                filter_size = (x_json.get("original_width", 0.0) or 0.0) >= self.min_size and x_json.get(
-                    "original_height", 0
-                ) >= self.min_size
-                filter_watermark = (x_json.get("pwatermark", 1.0) or 1.0) <= self.max_pwatermark
-                return filter_size and filter_watermark
-            else:
-                return False
-        except Exception:
-            return False
-
-
-class SDText2ImageDataset:
-    def __init__(
-        self,
-        train_shards_path_or_url: Union[str, List[str]],
-        num_train_examples: int,
-        per_gpu_batch_size: int,
-        global_batch_size: int,
-        num_workers: int,
-        resolution: int = 512,
-        interpolation_type: str = "bilinear",
-        shuffle_buffer_size: int = 1000,
-        pin_memory: bool = False,
-        persistent_workers: bool = False,
-    ):
-        if not isinstance(train_shards_path_or_url, str):
-            train_shards_path_or_url = [list(braceexpand(urls)) for urls in train_shards_path_or_url]
-            # flatten list using itertools
-            train_shards_path_or_url = list(itertools.chain.from_iterable(train_shards_path_or_url))
-
-        interpolation_mode = resolve_interpolation_mode(interpolation_type)
-
-        def transform(example):
-            # resize image
-            image = example["image"]
-            image = TF.resize(image, resolution, interpolation=interpolation_mode)
-
-            # get crop coordinates and crop image
-            c_top, c_left, _, _ = transforms.RandomCrop.get_params(image, output_size=(resolution, resolution))
-            image = TF.crop(image, c_top, c_left, resolution, resolution)
-            image = TF.to_tensor(image)
-            image = TF.normalize(image, [0.5], [0.5])
-
-            example["image"] = image
-            return example
-
-        processing_pipeline = [
-            wds.decode("pil", handler=wds.ignore_and_continue),
-            wds.rename(image="jpg;png;jpeg;webp", text="text;txt;caption", handler=wds.warn_and_continue),
-            wds.map(filter_keys({"image", "text"})),
-            wds.map(transform),
-            wds.to_tuple("image", "text"),
-        ]
-
-        # Create train dataset and loader
-        pipeline = [
-            wds.ResampledShards(train_shards_path_or_url),
-            tarfile_to_samples_nothrow,
-            wds.shuffle(shuffle_buffer_size),
-            *processing_pipeline,
-            wds.batched(per_gpu_batch_size, partial=False, collation_fn=default_collate),
-        ]
-
-        num_worker_batches = math.ceil(num_train_examples / (global_batch_size * num_workers))  # per dataloader worker
-        num_batches = num_worker_batches * num_workers
-        num_samples = num_batches * global_batch_size
-
-        # each worker is iterating over this
-        self._train_dataset = wds.DataPipeline(*pipeline).with_epoch(num_worker_batches)
-        self._train_dataloader = wds.WebLoader(
-            self._train_dataset,
-            batch_size=None,
-            shuffle=False,
-            num_workers=num_workers,
-            pin_memory=pin_memory,
-            persistent_workers=persistent_workers,
-        )
-        # add meta-data to dataloader instance for convenience
-        self._train_dataloader.num_batches = num_batches
-        self._train_dataloader.num_samples = num_samples
-
-    @property
-    def train_dataset(self):
-        return self._train_dataset
-
-    @property
-    def train_dataloader(self):
-        return self._train_dataloader
+VAL_PROMPTS = [
+    "water",
+    "fire",
+    "earth",
+    "air",
+    "light",
+    "electric",
+    "iPhone",
+    "Super Mario",
+]
 
 
 def log_validation(vae, unet, args, accelerator, weight_dtype, step):
@@ -250,7 +99,8 @@ def log_validation(vae, unet, args, accelerator, weight_dtype, step):
     )
     pipeline.set_progress_bar_config(disable=True)
 
-    lora_state_dict = get_module_kohya_state_dict(unet, "lora_unet", weight_dtype)
+    # lora_state_dict = convert_state_dict_to_diffusers(get_peft_model_state_dict(unet))
+    lora_state_dict = get_peft_model_state_dict(unet)
     pipeline.load_lora_weights(lora_state_dict)
     pipeline.fuse_lora()
 
@@ -263,16 +113,9 @@ def log_validation(vae, unet, args, accelerator, weight_dtype, step):
     else:
         generator = torch.Generator(device=accelerator.device).manual_seed(args.seed)
 
-    validation_prompts = [
-        "portrait photo of a girl, photograph, highly detailed face, depth of field, moody light, golden hour, style by Dan Winters, Russell James, Steve McCurry, centered, extremely detailed, Nikon D850, award winning photography",
-        "Self-portrait oil painting, a beautiful cyborg with golden hair, 8k",
-        "Astronaut in a jungle, cold color palette, muted colors, detailed, 8k",
-        "A photo of beautiful mountain with realistic sunset and blue lake, highly detailed, masterpiece",
-    ]
-
     image_logs = []
 
-    for _, prompt in enumerate(validation_prompts):
+    for _, prompt in enumerate(VAL_PROMPTS):
         images = []
         with torch.autocast("cuda", dtype=weight_dtype):
             images = pipeline(
@@ -434,40 +277,6 @@ class DDIMSolver:
         return x_prev
 
 
-@torch.no_grad()
-def update_ema(target_params, source_params, rate=0.99):
-    """
-    Update target parameters to be closer to those of source parameters using
-    an exponential moving average.
-
-    :param target_params: the target parameter sequence.
-    :param source_params: the source parameter sequence.
-    :param rate: the EMA rate (closer to 1 means slower).
-    """
-    for targ, src in zip(target_params, source_params):
-        targ.detach().mul_(rate).add_(src, alpha=1 - rate)
-
-
-def import_model_class_from_model_name_or_path(
-    pretrained_model_name_or_path: str, revision: str, subfolder: str = "text_encoder"
-):
-    text_encoder_config = PretrainedConfig.from_pretrained(
-        pretrained_model_name_or_path, subfolder=subfolder, revision=revision
-    )
-    model_class = text_encoder_config.architectures[0]
-
-    if model_class == "CLIPTextModel":
-        from transformers import CLIPTextModel
-
-        return CLIPTextModel
-    elif model_class == "CLIPTextModelWithProjection":
-        from transformers import CLIPTextModelWithProjection
-
-        return CLIPTextModelWithProjection
-    else:
-        raise ValueError(f"{model_class} is not supported.")
-
-
 def parse_args():
     parser = argparse.ArgumentParser(description="Simple example of a training script.")
     # ----------Model Checkpoint Loading Arguments----------
@@ -503,7 +312,7 @@ def parse_args():
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="lcm-xl-distilled",
+        required=True,
         help="The output directory where the model predictions and checkpoints will be written.",
     )
     parser.add_argument(
@@ -559,7 +368,7 @@ def parse_args():
     )
     # ----Image Processing----
     parser.add_argument(
-        "--train_shards_path_or_url",
+        "--dataset_name",
         type=str,
         default=None,
         help=(
@@ -567,6 +376,34 @@ def parse_args():
             " dataset). It can also be a path pointing to a local copy of a dataset in your filesystem,"
             " or to a folder containing files that 🤗 Datasets can understand."
         ),
+    )
+    parser.add_argument(
+        "--dataset_config_name",
+        type=str,
+        default=None,
+        help="The config of the Dataset, leave as None if there's only one config.",
+    )
+    parser.add_argument(
+        "--train_data_dir",
+        type=str,
+        default=None,
+        help=(
+            "A folder containing the training data. Folder contents must follow the structure described in"
+            " https://huggingface.co/docs/datasets/image_dataset#imagefolder. In particular, a `metadata.jsonl` file"
+            " must exist to provide the captions for the images. Ignored if `dataset_name` is specified."
+        ),
+    )
+    parser.add_argument(
+        "--image_column", 
+        type=str, 
+        default="image", 
+        help="The column of the dataset containing an image."
+    )
+    parser.add_argument(
+        "--caption_column",
+        type=str,
+        default="text",
+        help="The column of the dataset containing a caption or a list of captions.",
     )
     parser.add_argument(
         "--resolution",
@@ -585,20 +422,6 @@ def parse_args():
             "The interpolation function used when resizing images to the desired resolution. Choose between `bilinear`,"
             " `bicubic`, `box`, `nearest`, `nearest_exact`, `hamming`, and `lanczos`."
         ),
-    )
-    parser.add_argument(
-        "--center_crop",
-        default=False,
-        action="store_true",
-        help=(
-            "Whether to center crop the input images to the resolution. If not set, the images will be randomly"
-            " cropped. The images will be resized to the resolution first before cropping."
-        ),
-    )
-    parser.add_argument(
-        "--random_flip",
-        action="store_true",
-        help="whether to randomly flip images horizontally",
     )
     # ----Dataloader----
     parser.add_argument(
@@ -1041,7 +864,10 @@ def main(args):
             if accelerator.is_main_process:
                 unet_ = accelerator.unwrap_model(unet)
                 lora_state_dict = get_peft_model_state_dict(unet_, adapter_name="default")
-                StableDiffusionPipeline.save_lora_weights(os.path.join(output_dir, "unet_lora"), lora_state_dict)
+                StableDiffusionPipeline.save_lora_weights(
+                    save_directory=os.path.join(output_dir, "unet_lora"), 
+                    unet_lora_layers=lora_state_dict,
+                )
                 # save weights in peft format to be able to load them back
                 unet_.save_pretrained(output_dir)
 
@@ -1108,25 +934,91 @@ def main(args):
     )
 
     # 13. Dataset creation and data processing
-    # Here, we compute not just the text embeddings but also the additional embeddings
-    # needed for the SD XL UNet to operate.
+    if args.dataset_name is not None:
+        # Downloading and loading a dataset from the hub.
+        dataset = load_dataset(
+            args.dataset_name,
+            args.dataset_config_name,
+            cache_dir=args.cache_dir,
+        )
+    else:
+        data_files = {}
+        if args.train_data_dir is not None:
+            data_files["train"] = os.path.join(args.train_data_dir, "**")
+        dataset = load_dataset(
+            "imagefolder",
+            data_files=data_files,
+            cache_dir=args.cache_dir,
+        )
+
+    # Preprocessing the datasets.
+    column_names = dataset["train"].column_names
+
+    # Get the column names for input/target.
+    dataset_columns = DATASET_NAME_MAPPING.get(args.dataset_name, None)
+    if args.image_column is None:
+        image_column = dataset_columns[0] if dataset_columns is not None else column_names[0]
+    else:
+        image_column = args.image_column
+        if image_column not in column_names:
+            raise ValueError(
+                f"--image_column' value '{args.image_column}' needs to be one of: {', '.join(column_names)}"
+            )
+    if args.caption_column is None:
+        caption_column = dataset_columns[1] if dataset_columns is not None else column_names[1]
+    else:
+        caption_column = args.caption_column
+        if caption_column not in column_names:
+            raise ValueError(
+                f"--caption_column' value '{args.caption_column}' needs to be one of: {', '.join(column_names)}"
+            )
+
+    # Preprocessing the datasets.
+    interpolation_mode = resolve_interpolation_mode(args.interpolation_type)
+    train_resize = transforms.Resize(args.resolution, interpolation=interpolation_mode)
+    train_transforms = transforms.Compose([transforms.ToTensor(), transforms.Normalize([0.5], [0.5])])
+
+    def preprocess_train(examples: dict):
+        images = [image.convert("RGB") for image in examples[image_column]]
+        # image aug
+        all_images = []
+        for image in images:
+            image = train_resize(image)
+            image = train_transforms(image)
+            all_images.append(image)
+
+        examples["pixel_values"] = all_images
+        examples["captions"] = list(examples[caption_column])
+        return examples
+
+    with accelerator.main_process_first():
+        if args.max_train_samples is not None:
+            dataset["train"] = dataset["train"].shuffle(seed=args.seed).select(range(args.max_train_samples))
+        # Set the training transforms
+        train_dataset = dataset["train"].with_transform(preprocess_train)
+
+    def collate_fn(examples):
+        pixel_values = torch.stack([example["pixel_values"] for example in examples])
+        pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
+        captions = [example["captions"] for example in examples]
+
+        return {
+            "pixel_values": pixel_values,
+            "captions": captions,
+        }
+
+    # DataLoaders creation:
+    train_dataloader = torch.utils.data.DataLoader(
+        train_dataset,
+        shuffle=True,
+        collate_fn=collate_fn,
+        batch_size=args.train_batch_size,
+        num_workers=args.dataloader_num_workers,
+    )
+
     def compute_embeddings(prompt_batch, proportion_empty_prompts, text_encoder, tokenizer, is_train=True):
         prompt_embeds = encode_prompt(prompt_batch, text_encoder, tokenizer, proportion_empty_prompts, is_train)
         return {"prompt_embeds": prompt_embeds}
-
-    dataset = SDText2ImageDataset(
-        train_shards_path_or_url=args.train_shards_path_or_url,
-        num_train_examples=args.max_train_samples,
-        per_gpu_batch_size=args.train_batch_size,
-        global_batch_size=args.train_batch_size * accelerator.num_processes,
-        num_workers=args.dataloader_num_workers,
-        resolution=args.resolution,
-        interpolation_type=args.interpolation_type,
-        shuffle_buffer_size=1000,
-        pin_memory=True,
-        persistent_workers=True,
-    )
-    train_dataloader = dataset.train_dataloader
 
     compute_embeddings_fn = functools.partial(
         compute_embeddings,
@@ -1224,12 +1116,15 @@ def main(args):
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(unet):
                 # 1. Load and process the image and text conditioning
-                image, text = batch
+                pixel_values, text = (
+                    batch["pixel_values"],
+                    batch["captions"],
+                )
 
-                image = image.to(accelerator.device, non_blocking=True)
+                pixel_values = pixel_values.to(accelerator.device, non_blocking=True)
                 encoded_text = compute_embeddings_fn(text)
 
-                pixel_values = image.to(dtype=weight_dtype)
+                pixel_values = pixel_values.to(dtype=weight_dtype)
                 if vae.dtype != weight_dtype:
                     vae.to(dtype=weight_dtype)
 
@@ -1433,14 +1328,16 @@ def main(args):
             if global_step >= args.max_train_steps:
                 break
 
-    # Create the pipeline using using the trained modules and save it.
+    # Create the pipeline using the trained modules and save it.
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
         unet = accelerator.unwrap_model(unet)
         unet.save_pretrained(args.output_dir)
         lora_state_dict = get_peft_model_state_dict(unet, adapter_name="default")
-        StableDiffusionPipeline.save_lora_weights(os.path.join(args.output_dir, "unet_lora"), lora_state_dict)
-
+        StableDiffusionPipeline.save_lora_weights(
+            save_directory=os.path.join(args.output_dir, "unet_lora"), 
+            unet_lora_layers=lora_state_dict,
+        )
         if args.push_to_hub:
             upload_folder(
                 repo_id=repo_id,
