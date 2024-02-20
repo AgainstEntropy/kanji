@@ -35,7 +35,7 @@ from accelerate.utils import ProjectConfiguration, set_seed
 from datasets import load_dataset
 from huggingface_hub import create_repo, upload_folder
 from packaging import version
-from peft import LoraConfig, get_peft_model, get_peft_model_state_dict
+from peft import PeftModel, LoraConfig, get_peft_model, get_peft_model_state_dict
 from torchvision import transforms
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer, CLIPTextModel
@@ -84,9 +84,9 @@ VAL_PROMPTS = [
 ]
 
 
-def unwrap_peft_state_dict(module: torch.nn.Module, dtype: torch.dtype, adapter_name: str = "default"):
+def unwrap_peft_state_dict(peft_model: PeftModel, dtype: torch.dtype, adapter_name: str = "default"):
     unwrapped_state_dict = {}
-    for peft_key, weight in get_peft_model_state_dict(module, adapter_name=adapter_name).items():
+    for peft_key, weight in get_peft_model_state_dict(peft_model, adapter_name=adapter_name).items():
         key = peft_key.replace("base_model.model.", "")
         unwrapped_state_dict[key] = weight.to(dtype)
 
@@ -102,6 +102,7 @@ def log_validation(vae, unet, args, accelerator, weight_dtype, step):
         scheduler=LCMScheduler.from_pretrained(args.pretrained_teacher_model, subfolder="scheduler"),
         revision=args.revision,
         torch_dtype=weight_dtype,
+        variant="fp16",
         safety_checker=None,
         requires_safety_checker=False,
     )
@@ -114,7 +115,7 @@ def log_validation(vae, unet, args, accelerator, weight_dtype, step):
 
     pipeline.to(accelerator.device, dtype=weight_dtype)
     if args.enable_xformers_memory_efficient_attention:
-        pipeline.enable_xformers_memory_efficient_attention()
+        pipeline.enable_xformers_memory_efficient_attention(attention_op=None)
 
     if args.seed is None:
         generator = None
@@ -125,16 +126,15 @@ def log_validation(vae, unet, args, accelerator, weight_dtype, step):
 
     for _, prompt in enumerate(VAL_PROMPTS):
         images = []
-        with torch.autocast("cuda", dtype=weight_dtype):
-            images = pipeline(
-                prompt=prompt,
-                height=args.resolution,
-                width=args.resolution,
-                num_inference_steps=4,
-                num_images_per_prompt=2,
-                generator=generator,
-                guidance_scale=1.0,
-            ).images
+        images = pipeline(
+            prompt=prompt,
+            height=args.resolution,
+            width=args.resolution,
+            num_inference_steps=4,
+            num_images_per_prompt=2,
+            generator=generator,
+            guidance_scale=1.0,
+        ).images
         image_logs.append({"validation_prompt": prompt, "images": images})
 
     for tracker in accelerator.trackers:
@@ -907,9 +907,8 @@ def main(args):
                 logger.warn(
                     "xFormers 0.0.16 cannot be used for training in some GPUs. If you observe problems during training, please update xFormers to at least 0.0.17. See https://huggingface.co/docs/diffusers/main/en/optimization/xformers for more details."
                 )
-            unet.enable_xformers_memory_efficient_attention()
-            teacher_unet.enable_xformers_memory_efficient_attention()
-            # target_unet.enable_xformers_memory_efficient_attention()
+            unet.enable_xformers_memory_efficient_attention(attention_op=None)
+            teacher_unet.enable_xformers_memory_efficient_attention(attention_op=None)
         else:
             raise ValueError("xformers is not available. Make sure it is installed correctly")
 
@@ -1023,6 +1022,7 @@ def main(args):
         shuffle=True,
         collate_fn=collate_fn,
         batch_size=args.train_batch_size,
+        drop_last=True,
         num_workers=args.dataloader_num_workers,
     )
     setattr(train_dataloader, "num_batches", len(train_dataloader))
@@ -1071,7 +1071,7 @@ def main(args):
         accelerator.init_trackers(args.tracker_project_name, config=tracker_config)
 
     uncond_input_ids = tokenizer(
-        [""] * args.train_batch_size, return_tensors="pt", padding="max_length", max_length=77
+        [""] * args.train_batch_size, return_tensors="pt", padding="max_length", max_length=tokenizer.model_max_length
     ).input_ids.to(accelerator.device)
     uncond_prompt_embeds = text_encoder(uncond_input_ids)[0]
 
