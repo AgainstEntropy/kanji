@@ -6,7 +6,7 @@ DATASET_NAME="AgainstEntropy/kanji-20230110-main"
 
 PROJECT_DIR="$VAST/codes/kanji"
 PROJECT_NAME="kanji-lora-lcm-sd-15"
-OUTPUT_DIR="${PROJECT_DIR}/${PROJECT_NAME}-0"
+OUTPUT_DIR="${PROJECT_DIR}/ckpts/${PROJECT_NAME}-1"
 SCRIPT_PATH="${PROJECT_DIR}/train_lcm_distill_lora_sd.py"
 
 source $VAST/miniconda3/bin/activate kanji
@@ -25,7 +25,8 @@ accelerate launch ${SCRIPT_PATH} \
     --gradient_accumulation_steps=1 \
     --lora_rank=128 \
     --learning_rate=1e-4 \
-    --lr_scheduler="constant" \
+    --lr_scheduler="cosine" \
+    --lr_warmup_steps=200 \
     --loss_type="huber" \
     --adam_weight_decay=0.0 \
     --max_train_steps=5000 \

@@ -1,5 +1,5 @@
 
-kanji-lora-lcm-sd-*/
+ckpts/
 wandb/
 data/
 *.ipynb

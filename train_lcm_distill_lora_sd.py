@@ -83,6 +83,8 @@ VAL_PROMPTS = [
     "Super Mario",
 ]
 
+PROMPT_PREFIX = "Japanese kanji character,"
+
 
 def unwrap_peft_state_dict(peft_model: PeftModel, dtype: torch.dtype, adapter_name: str = "default"):
     unwrapped_state_dict = {}
@@ -127,7 +129,7 @@ def log_validation(vae, unet, args, accelerator, weight_dtype, step):
     for _, prompt in enumerate(VAL_PROMPTS):
         images = []
         images = pipeline(
-            prompt=prompt,
+            prompt=PROMPT_PREFIX + prompt,
             height=args.resolution,
             width=args.resolution,
             num_inference_steps=4,
@@ -998,6 +1000,7 @@ def main(args):
 
         examples["pixel_values"] = all_images
         examples["captions"] = list(examples[caption_column])
+        examples["captions"] = [PROMPT_PREFIX + cap for cap in examples["captions"]]
         return examples
 
     with accelerator.main_process_first():
