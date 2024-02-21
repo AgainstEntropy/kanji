@@ -68,8 +68,9 @@ if is_wandb_available():
 logger = get_logger(__name__)
 
 DATASET_NAME_MAPPING = {
-    "lambdalabs/pokemon-blip-captions": ("image", "text"),
     "AgainstEntropy/kanji-20230110-main": ("image", "text"),
+    "epts/kanji-full": ("image", "text"),
+    "lm468/kanji_meanings": ("image", "text"),
 }
 
 VAL_PROMPTS = [
@@ -82,9 +83,6 @@ VAL_PROMPTS = [
     "iPhone",
     "Super Mario",
 ]
-
-PROMPT_PREFIX = "Japanese kanji character,"
-
 
 def unwrap_peft_state_dict(peft_model: PeftModel, dtype: torch.dtype, adapter_name: str = "default"):
     unwrapped_state_dict = {}
@@ -126,18 +124,22 @@ def log_validation(vae, unet, args, accelerator, weight_dtype, step):
 
     image_logs = []
 
+    pipe = functools.partial(
+        pipeline,
+        height=args.resolution,
+        width=args.resolution,
+        num_images_per_prompt=1,
+        generator=generator,
+        guidance_scale=1.0,
+    )
+
     for _, prompt in enumerate(VAL_PROMPTS):
-        images = []
-        images = pipeline(
-            prompt=PROMPT_PREFIX + prompt,
-            height=args.resolution,
-            width=args.resolution,
-            num_inference_steps=4,
-            num_images_per_prompt=2,
-            generator=generator,
-            guidance_scale=1.0,
-        ).images
-        image_logs.append({"validation_prompt": prompt, "images": images})
+        for infer_steps in [4, 8]:
+            images = pipe(
+                prompt=args.prompt_prefix + prompt, 
+                num_inference_steps=infer_steps
+            ).images
+            image_logs.append({"validation_prompt": f"{prompt}-{infer_steps}steps", "images": images})
 
     for tracker in accelerator.trackers:
         if tracker.name == "tensorboard":
@@ -487,7 +489,17 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--lr_warmup_steps", type=int, default=500, help="Number of steps for the warmup in the lr scheduler."
+        "--lr_step_rules",
+        type=str,
+        default="1",
+        help=(
+            'The rules for the learning rate. ex: rule_steps="1:10,0.1:20,0.01:30,0.005" it means that the learning rate'
+            'if multiple 1 for the first 10 steps, mutiple 0.1 for the next 20 steps, multiple 0.01 for the next 30'
+            'steps and multiple 0.005 for the other steps.'
+        ),
+    )
+    parser.add_argument(
+        "--lr_warmup_steps", type=int, default=None, help="Number of steps for the warmup in the lr scheduler."
     )
     parser.add_argument(
         "--gradient_accumulation_steps",
@@ -664,6 +676,13 @@ def parse_args():
             "The `project_name` argument passed to Accelerator.init_trackers for"
             " more information see https://huggingface.co/docs/accelerate/v0.17.0/en/package_reference/accelerator#accelerate.Accelerator"
         ),
+    )
+    # ----------Kanji Related Arguments----------
+    parser.add_argument(
+        "--prompt_prefix",
+        type=str,
+        default="",
+        help="The prefix to use for the prompt. Defaults to an empty string.",
     )
 
     args = parser.parse_args()
@@ -1000,7 +1019,7 @@ def main(args):
 
         examples["pixel_values"] = all_images
         examples["captions"] = list(examples[caption_column])
-        examples["captions"] = [PROMPT_PREFIX + cap for cap in examples["captions"]]
+        examples["captions"] = [args.prompt_prefix + cap for cap in examples["captions"]]
         return examples
 
     with accelerator.main_process_first():
@@ -1052,7 +1071,8 @@ def main(args):
     lr_scheduler = get_scheduler(
         args.lr_scheduler,
         optimizer=optimizer,
-        num_warmup_steps=args.lr_warmup_steps,
+        step_rules=args.lr_step_rules,
+        num_warmup_steps=args.lr_warmup_steps or args.max_train_steps // 25,
         num_training_steps=args.max_train_steps,
     )
 
@@ -1090,6 +1110,9 @@ def main(args):
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
     global_step = 0
     first_epoch = 0
+
+    # Log the initial generation
+    log_validation(vae, unet, args, accelerator, weight_dtype, global_step)
 
     # Potentially load in the weights and states from a previous save
     if args.resume_from_checkpoint:
