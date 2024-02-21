@@ -1,16 +1,17 @@
 #!/bin/bash
 
-MODEL_NAME="$VAST/models/stable-diffusion-v1-5"
-VAE_PATH="$VAST/models/stable-diffusion-v1-5"
+MODEL_NAME="$VAST/models/stable-diffusion-v1-4"
+VAE_PATH="$VAST/models/stable-diffusion-v1-4"
 # DATASET_NAME="AgainstEntropy/kanji-20230110-main"
 DATASET_NAME="epts/kanji-full"
 
 PROJECT_DIR="$VAST/codes/kanji"
-PROJECT_NAME="kanji-lora-lcm-sd-15"
-OUTPUT_DIR="${PROJECT_DIR}/ckpts/${PROJECT_NAME}-2"
+PROJECT_NAME="kanji-lora-lcm-sd-14"
+OUTPUT_DIR="${PROJECT_DIR}/ckpts/${PROJECT_NAME}-0"
 SCRIPT_PATH="${PROJECT_DIR}/train_lcm_distill_lora_sd.py"
 
-PROMPT_PREFIX="Japanese Kanji character, "
+PROMPT_PREFIX="Japanese Kanji character, white background, "
+# PROMPT_PREFIX=""
 
 source $VAST/miniconda3/bin/activate kanji
 
@@ -27,8 +28,8 @@ accelerate launch ${SCRIPT_PATH} \
     --train_batch_size=32 \
     --dataloader_num_workers=8 \
     --gradient_accumulation_steps=1 \
-    --lora_rank=128 \
-    --lora_alpha=128 \
+    --lora_rank=64 \
+    --lora_alpha=64 \
     --learning_rate=5e-4 \
     --lr_scheduler="cosine" \
     --lr_warmup_steps=200 \

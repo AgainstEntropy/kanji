@@ -46,7 +46,6 @@ import diffusers
 from diffusers import (
     AutoencoderKL, 
     DDPMScheduler, 
-    DiffusionPipeline, 
     StableDiffusionPipeline, 
     UNet2DConditionModel,
 )
@@ -428,17 +427,17 @@ VAL_PROMPTS = [
 
 
 def log_validation(args, unwrapped_unet, accelerator, weight_dtype, step):
-    logger.info(
-        f"Running validation... \n Generating {args.num_validation_images} images with prompt:"
-        f" {args.validation_prompt}."
-    )
+    logger.info("Running validation...")
+
     # create pipeline
-    pipeline = DiffusionPipeline.from_pretrained(
+    pipeline = StableDiffusionPipeline.from_pretrained(
         args.pretrained_model_name_or_path,
         unet=unwrapped_unet,
         revision=args.revision,
         variant=args.variant,
         torch_dtype=weight_dtype,
+        safety_checker=None,
+        requires_safety_checker=False,
     )
     pipeline.set_progress_bar_config(disable=True)
     pipeline = pipeline.to(accelerator.device, dtype=weight_dtype)
@@ -811,9 +810,6 @@ def main():
     global_step = 0
     first_epoch = 0
 
-    # Log the initial generation
-    log_validation(args, unwrap_model(unet), accelerator, weight_dtype, global_step)
-
     # Potentially load in the weights and states from a previous save
     if args.resume_from_checkpoint:
         if args.resume_from_checkpoint != "latest":
@@ -840,6 +836,9 @@ def main():
             first_epoch = global_step // num_update_steps_per_epoch
     else:
         initial_global_step = 0
+
+    # Log the initial generation
+    log_validation(args, unwrap_model(unet), accelerator, weight_dtype, global_step)
 
     progress_bar = tqdm(
         range(0, args.max_train_steps),
@@ -971,10 +970,10 @@ def main():
                         logger.info(f"Saved state to {save_path}")
 
                     if global_step % args.validation_steps == 0:
-                        log_validation(args, vae, unwrapped_unet, accelerator, weight_dtype, global_step)
+                        log_validation(args, unwrap_model(unet), accelerator, weight_dtype, global_step)
 
 
-            logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
+            logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
 
             if global_step >= args.max_train_steps:
@@ -1011,7 +1010,7 @@ def main():
         # Final inference
         # Load previous pipeline
         if args.validation_prompt is not None:
-            pipeline = DiffusionPipeline.from_pretrained(
+            pipeline = StableDiffusionPipeline.from_pretrained(
                 args.pretrained_model_name_or_path,
                 revision=args.revision,
                 variant=args.variant,

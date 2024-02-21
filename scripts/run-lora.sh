@@ -1,7 +1,6 @@
 #!/bin/bash
 
 MODEL_NAME="$VAST/models/stable-diffusion-v1-5"
-# VAE_PATH="$VAST/models/stable-diffusion-v1-5"
 # DATASET_NAME="AgainstEntropy/kanji-20230110-main"
 DATASET_NAME="epts/kanji-full"
 
@@ -16,14 +15,14 @@ source $VAST/miniconda3/bin/activate kanji
 
 accelerate launch ${SCRIPT_PATH} \
     --prompt_prefix=${PROMPT_PREFIX} \
-    --mixed_precision="fp16" \
-    --enable_xformers_memory_efficient_attention \
     --pretrained_model_name_or_path=${MODEL_NAME}  \
     --dataset_name=${DATASET_NAME} \
     --image_column="image" \
     --caption_column="text" \
+    --mixed_precision="no" \
+    --enable_xformers_memory_efficient_attention \
     --resolution=256 \
-    --train_batch_size=32 \
+    --train_batch_size=16 \
     --dataloader_num_workers=8 \
     --lora_rank=16 \
     --learning_rate=1e-4 \

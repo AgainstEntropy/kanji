@@ -1111,9 +1111,6 @@ def main(args):
     global_step = 0
     first_epoch = 0
 
-    # Log the initial generation
-    log_validation(vae, unet, args, accelerator, weight_dtype, global_step)
-
     # Potentially load in the weights and states from a previous save
     if args.resume_from_checkpoint:
         if args.resume_from_checkpoint != "latest":
@@ -1140,6 +1137,9 @@ def main(args):
             first_epoch = global_step // num_update_steps_per_epoch
     else:
         initial_global_step = 0
+
+    # Log the initial generation
+    log_validation(vae, unet, args, accelerator, weight_dtype, global_step)
 
     progress_bar = tqdm(
         range(0, args.max_train_steps),
@@ -1316,11 +1316,14 @@ def main(args):
                         torch.sqrt((model_pred.float() - target.float()) ** 2 + args.huber_c**2) - args.huber_c
                     )
 
-                # 11. Backpropagate on the online student model (`unet`)
-                accelerator.backward(loss)
-                if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(unet.parameters(), args.max_grad_norm)
-                optimizer.step()
+                if loss.isnan().any():
+                    logger.warning(f"NaN detected in loss at step {global_step}. Skipping this step.")
+                else:
+                    # 11. Backpropagate on the online student model (`unet`)
+                    accelerator.backward(loss)
+                    if accelerator.sync_gradients:
+                        accelerator.clip_grad_norm_(unet.parameters(), args.max_grad_norm)
+                    optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
 
