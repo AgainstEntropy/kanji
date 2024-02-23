@@ -10,6 +10,9 @@ PROJECT_NAME="kanji-lora-sd-1${SD_VERSION}"
 OUTPUT_DIR="${PROJECT_DIR}/ckpts/${PROJECT_NAME}-3"
 SCRIPT_PATH="${PROJECT_DIR}/train_text_to_image_lora.py"
 
+CKPT="latest"
+# CKPT="${PROJECT_DIR}/ckpts/kanji-lora-sd-15-1/checkpoint-5000"
+
 PROMPT_PREFIX=""
 
 source $VAST/miniconda3/bin/activate kanji
@@ -37,7 +40,8 @@ accelerate launch ${SCRIPT_PATH} \
     --report_to="wandb" \
     --tracker_project_name=${PROJECT_NAME} \
     --output_dir=${OUTPUT_DIR} \
-    --resume_from_checkpoint="latest" \
+    --resume_from_checkpoint=${CKPT} \
     --seed=0
+
     # --lr_warmup_steps=200 \
     # --push_to_hub

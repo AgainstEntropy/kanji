@@ -75,10 +75,10 @@ DATASET_NAME_MAPPING = {
 
 VAL_PROMPTS = [
     "water",
-    "fire",
+    "wood",
     "earth",
-    "air",
-    "light",
+    "gold",
+    "fire",
     "electric",
     "iPhone",
     "Super Mario",
@@ -107,6 +107,10 @@ def log_validation(vae, unet, args, accelerator, weight_dtype, step):
         requires_safety_checker=False,
     )
     pipeline.set_progress_bar_config(disable=True)
+    pipeline.load_lora_weights(args.pretrained_teacher_lora)
+    pipeline.fuse_lora()
+    logger.info(f"Fused LoRA from {args.pretrained_teacher_lora}", main_process_only=True)
+    pipeline.unload_lora_weights()
 
     unwrapped_unet = accelerator.unwrap_model(unet)
     lora_state_dict = unwrap_peft_state_dict(unwrapped_unet, weight_dtype)
@@ -306,6 +310,13 @@ def parse_args():
         type=str,
         default=None,
         help="Path to pretrained VAE model with better numerical stability. More details: https://github.com/huggingface/diffusers/pull/4038.",
+    )
+    parser.add_argument(
+        "--pretrained_teacher_lora",
+        type=str,
+        default=None,
+        required=False,
+        help="Path to LoRA that will be fused into pretrained LDM teacher model",
     )
     parser.add_argument(
         "--teacher_revision",
@@ -774,7 +785,9 @@ def main(args):
 
     # 1. Create the noise scheduler and the desired noise schedule.
     noise_scheduler = DDPMScheduler.from_pretrained(
-        args.pretrained_teacher_model, subfolder="scheduler", revision=args.teacher_revision
+        args.pretrained_teacher_model, 
+        subfolder="scheduler", 
+        revision=args.teacher_revision
     )
 
     # DDPMScheduler calculates the alpha and sigma noise schedules (based on the alpha bars) for us
@@ -789,13 +802,18 @@ def main(args):
 
     # 2. Load tokenizers from SD 1.X/2.X checkpoint.
     tokenizer = AutoTokenizer.from_pretrained(
-        args.pretrained_teacher_model, subfolder="tokenizer", revision=args.teacher_revision, use_fast=False
+        args.pretrained_teacher_model, 
+        subfolder="tokenizer", 
+        revision=args.teacher_revision, 
+        use_fast=False
     )
 
     # 3. Load text encoders from SD 1.X/2.X checkpoint.
     # import correct text encoder classes
     text_encoder = CLIPTextModel.from_pretrained(
-        args.pretrained_teacher_model, subfolder="text_encoder", revision=args.teacher_revision
+        args.pretrained_teacher_model, 
+        subfolder="text_encoder", 
+        revision=args.teacher_revision
     )
 
     # 4. Load VAE from SD 1.X/2.X checkpoint
@@ -805,20 +823,30 @@ def main(args):
         revision=args.teacher_revision,
     )
 
-    # 5. Load teacher U-Net from SD 1.X/2.X checkpoint
-    teacher_unet = UNet2DConditionModel.from_pretrained(
-        args.pretrained_teacher_model, subfolder="unet", revision=args.teacher_revision
-    )
-
     # 6. Freeze teacher vae, text_encoder, and teacher_unet
     vae.requires_grad_(False)
     text_encoder.requires_grad_(False)
-    teacher_unet.requires_grad_(False)
 
     # 7. Create online student U-Net.
-    unet = UNet2DConditionModel.from_pretrained(
-        args.pretrained_teacher_model, subfolder="unet", revision=args.teacher_revision
-    )
+    if args.pretrained_teacher_lora is None:
+        teacher_unet = UNet2DConditionModel.from_pretrained(
+            args.pretrained_teacher_model, subfolder="unet", revision=args.teacher_revision
+        )
+    else:
+        pipe = StableDiffusionPipeline.from_pretrained(
+            args.pretrained_teacher_model, revision=args.teacher_revision
+        )
+        pipe.load_lora_weights(args.pretrained_teacher_lora)
+        pipe.fuse_lora()
+        logger.info(f"Fused LoRA from {args.pretrained_teacher_lora}", main_process_only=True)
+        pipe.unload_lora_weights()
+
+        teacher_unet = pipe.unet
+    
+    from copy import deepcopy
+    unet = deepcopy(teacher_unet)
+
+    teacher_unet.requires_grad_(False)
     unet.train()
 
     # Check that all trainable models are in full precision
