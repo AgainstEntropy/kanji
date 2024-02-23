@@ -23,6 +23,7 @@ import os
 import random
 import shutil
 from pathlib import Path
+from typing import Union
 
 import datasets
 import numpy as np
@@ -416,10 +417,10 @@ DATASET_NAME_MAPPING = {
 
 VAL_PROMPTS = [
     "water",
-    "fire",
+    "wood",
     "earth",
-    "air",
-    "light",
+    "gold",
+    "fire",
     "electric",
     "iPhone",
     "Super Mario",
@@ -460,7 +461,7 @@ def log_validation(args, unwrapped_unet, accelerator, weight_dtype, step):
     )
 
     for _, prompt in enumerate(VAL_PROMPTS):
-        for infer_steps in [10, 20]:
+        for infer_steps in [20, ]:
             images = pipe(
                 prompt=args.prompt_prefix + prompt, 
                 num_inference_steps=infer_steps
@@ -725,8 +726,7 @@ def main():
     # Preprocessing the datasets.
     train_transforms = transforms.Compose(
         [
-            transforms.Resize(args.resolution, interpolation=transforms.InterpolationMode.BILINEAR),
-            transforms.CenterCrop(args.resolution) if args.center_crop else transforms.RandomCrop(args.resolution),
+            transforms.Resize(args.resolution, interpolation=transforms.InterpolationMode.BICUBIC),
             transforms.RandomHorizontalFlip() if args.random_flip else transforms.Lambda(lambda x: x),
             transforms.ToTensor(),
             transforms.Normalize([0.5], [0.5]),
@@ -928,7 +928,6 @@ def main():
             if accelerator.sync_gradients:
                 progress_bar.update(1)
                 global_step += 1
-                accelerator.log({"train_loss": train_loss}, step=global_step)
                 train_loss = 0.0
 
                 if accelerator.is_main_process:
@@ -974,6 +973,7 @@ def main():
 
 
             logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
+            accelerator.log(logs, step=global_step)
             progress_bar.set_postfix(**logs)
 
             if global_step >= args.max_train_steps:
