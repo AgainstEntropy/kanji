@@ -1,5 +1,6 @@
 
+*.pyc
+
 ckpts/
 wandb/
-data/
-*.ipynb
+data/kanjivg-*
