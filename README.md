@@ -4,7 +4,7 @@ This projects aims to build a novel dialogue system.
 
 Users are not talking to a common ChatBot in English, but in a kanji-like novel language, where responses are rendered with Diffusion-based models.
 
-Thanks to the StreamDiffusion pipeline, the system can stream character-level images, just like a normal dialog stream.
+Thanks to the [StreamDiffusion](https://github.com/cumulo-autumn/StreamDiffusion) pipeline, the system can stream character-level images, just like a normal dialog stream. We build this system based on [StreamDiffusionIO](https://github.com/AgainstEntropy/StreamDiffusionIO), a modified version of StreamDiffusion that supports using different text prompt on different samples respectively but consistently.
 
 ## Deploy the System
 
