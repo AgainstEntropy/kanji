@@ -1,7 +1,9 @@
 
+assets/
 ckpts/
 wandb/
 data/kanjivg-*
+tmp/
 
 # Below are from https://github.com/github/gitignore/blob/main/Python.gitignore
 
