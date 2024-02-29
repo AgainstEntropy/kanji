@@ -6,6 +6,7 @@ Users are not talking to a common Chatbot in English, but in a kanji-like fake l
 
 We build this system based on [StreamDiffusionIO](https://github.com/AgainstEntropy/StreamDiffusionIO), a modified version of [StreamDiffusion](https://github.com/cumulo-autumn/StreamDiffusion) that supports rendering text streams into image streams.
 
+https://github.com/AgainstEntropy/kanji/assets/42559837/2a623697-94cd-406b-91bc-76c846bdc05a
 
 ## Deploy
 
