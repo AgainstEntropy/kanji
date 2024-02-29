@@ -1,7 +1,11 @@
 
+assets/
 ckpts/
 wandb/
 data/kanjivg-*
+tmp/
+lora_weights/
+notebooks/
 
 # Below are from https://github.com/github/gitignore/blob/main/Python.gitignore
 

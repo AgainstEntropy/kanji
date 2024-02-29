@@ -1,13 +1,5 @@
 # Reproduce
 
-## Setup environment
-
-```bash
-conda create -n kanji python=3.10
-conda activate kanji
-pip install -r requirements.txt
-```
-
 ## Prepare the dataset
 
 ### Access form HuggingFace
@@ -23,8 +15,10 @@ Or, if you would like to create a dataset on your own, check out the following u
 
 Before getting on to build the dataset, we need to prepare `kanjidic2.xml` and a folder that contains seperated kanji svg files (e.g., `kanjivg-20230110-main`). 
 
-```python
+```shell
 cd data/
+pip install requirements.txt
+
 python prepare_svg.py
 python build_dataset.py
 ```
