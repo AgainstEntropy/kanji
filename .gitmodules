@@ -1,3 +1,6 @@
 [submodule "StreamDiffusionIO"]
 	path = StreamDiffusionIO
 	url = https://github.com/AgainstEntropy/StreamDiffusionIO.git
+[submodule "demo"]
+	path = demo
+	url = https://huggingface.co/spaces/AgainstEntropy/Kanji-Streaming
