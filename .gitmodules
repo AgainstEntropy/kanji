@@ -3,4 +3,4 @@
 	url = https://github.com/AgainstEntropy/StreamDiffusionIO.git
 [submodule "demo"]
 	path = demo
-	url = https://huggingface.co/spaces/AgainstEntropy/Kanji-Streaming
+	url = https://github.com/AgainstEntropy/kanji-streaming-demo.git
